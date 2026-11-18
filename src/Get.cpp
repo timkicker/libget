@@ -1,10 +1,16 @@
 #include <algorithm>
 #include <cstdarg>
+#include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unordered_set>
+
+#if !defined(WIN32) && !defined(_WIN32)
+#include <unistd.h>
+#endif
 
 #include "rapidjson/document.h"
 #include "rapidjson/istreamwrapper.h"
@@ -17,6 +23,26 @@
 #include "Utils.hpp"
 
 using namespace rapidjson;
+
+// Writes the whole string in one go and syncs it to the card, so we don't
+// leave a half written repos.json behind. No tmp file or rename here, since
+// rename doesn't replace an existing file on every homebrew platform.
+static bool writeWholeFile(const std::string& path, const char* data)
+{
+	FILE* file = fopen(path.c_str(), "wb");
+	if (!file)
+		return false;
+
+	size_t len = strlen(data);
+	bool ok = fwrite(data, 1, len, file) == len && fflush(file) == 0;
+
+#if !defined(WIN32) && !defined(_WIN32)
+	if (ok)
+		fsync(fileno(file));
+#endif
+
+	return fclose(file) == 0 && ok;
+}
 
 bool debug = false;
 
@@ -184,13 +210,13 @@ void Get::saveRepos() {
 
 	d.AddMember("repos", reposOut, allocator);
 
-	std::ofstream file(mRepos_path);
 	StringBuffer buffer;
 	Writer<StringBuffer> writer(buffer);
 	d.Accept(writer);
 	std::cout << buffer.GetString() << std::endl;
-	file << buffer.GetString();
-	file.close();
+
+	if (!writeWholeFile(mRepos_path, buffer.GetString()))
+		printf("--> Could not write %s\n", mRepos_path.c_str());
 }
 
 /**
@@ -201,27 +227,32 @@ void Get::loadRepos()
 	repos.clear();
 
 	auto& config_path = mRepos_path;
+
+	auto makeDefaultRepo = [this]() -> std::unique_ptr<Repo> {
+#if defined(WII) || defined(_3DS) || defined(WII_MOCK)
+		return GetRepo::createRepo("Default Repo", this->mDefaultRepo, true, this->mDefaultRepoType, mPkg_path);
+#else
+		return std::make_unique<GetRepo>("Default Repo", this->mDefaultRepo, true);
+#endif
+	};
+
 	std::ifstream ifs(config_path);
+	bool generated = false;
 
 	if (!ifs.good() || ifs.peek() == std::ifstream::traits_type::eof())
 	{
 		printf("--> Could not load repos from %s, generating default GET repos.json\n", config_path.c_str());
 
-#if defined(WII) || defined(_3DS) || defined(WII_MOCK)
-		auto defaultRepo = GetRepo::createRepo("Default Repo", this->mDefaultRepo, true, this->mDefaultRepoType, mPkg_path);
-#else
-		auto defaultRepo = std::make_unique<GetRepo>("Default Repo", this->mDefaultRepo, true);
-#endif
+		auto defaultRepo = makeDefaultRepo();
 
 		Document d;
 		d.Parse(Repo::generateRepoJson(*defaultRepo).c_str());
 
-		std::ofstream file(config_path);
 		StringBuffer buffer;
 		Writer<StringBuffer> writer(buffer);
 		d.Accept(writer);
-		file << buffer.GetString();
-		file.close();
+		ifs.close();
+		writeWholeFile(config_path, buffer.GetString());
 
 		ifs = std::ifstream(config_path);
 
@@ -233,6 +264,7 @@ void Get::loadRepos()
 			repos.push_back(std::move(defaultRepo));
 			return;
 		}
+		generated = true;
 	}
 
 	IStreamWrapper isw(ifs);
@@ -242,7 +274,26 @@ void Get::loadRepos()
 
 	if (!ok || !doc.HasMember("repos"))
 	{
-		printf("--> Invalid format in %s", config_path.c_str());
+		printf("--> Invalid format in %s\n", config_path.c_str());
+		ifs.close();
+
+		// keep the broken file (e.g. NUL bytes after a power cut) as .bad and
+		// start over with a default one. The old .bad goes first, since rename
+		// can't overwrite on some platforms.
+		if (!generated)
+		{
+			std::string badPath = config_path + ".bad";
+			std::remove(badPath.c_str());
+			if (std::rename(config_path.c_str(), badPath.c_str()) == 0)
+			{
+				printf("--> Moved %s to %s\n", config_path.c_str(), badPath.c_str());
+				loadRepos();
+				return;
+			}
+		}
+
+		// can't move it or our own default is broken, so stay in memory
+		repos.push_back(makeDefaultRepo());
 		return;
 	}
 

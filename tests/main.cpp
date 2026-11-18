@@ -16,6 +16,7 @@
 #include "12_RepoAddAndRemove.hpp"
 #include "13_ResumeDownloadTest.hpp"
 #include "14_LargeDownloadProgressTest.hpp"
+#include "15_CorruptReposJson.hpp"
 
 
 using namespace std;
@@ -65,6 +66,7 @@ int main()
 	tests.push_back(std::make_unique<FakeManifestUpgradeTest>());
 	tests.push_back(std::make_unique<ResumeDownloadTest>());
 	tests.push_back(std::make_unique<LargeDownloadProgressTest>());
+	tests.push_back(std::make_unique<CorruptReposJsonTest>());
 	// tests.push_back(std::make_unique<PackagesSortedTest>());
 	// tests.push_back(std::make_unique<RepoAddAndRemoveTest>());
 
